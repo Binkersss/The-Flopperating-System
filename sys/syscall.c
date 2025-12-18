@@ -35,26 +35,12 @@ You should have received a copy of the GNU General Public License along with Flo
 
 #include "syscall.h"
 
-// statically make the syscall table at compile time
-
 // perform the syscall software interrupt
 // returns -1 on failure, or the syscall return value
 int syscall(syscall_num_t num, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5) {
     uint32_t ret;
 
-    // retrieve syscall number and arguments from registers
-    register uint32_t r_eax asm("eax") = num;
-    register uint32_t r_ebx asm("ebx") = a1;
-    register uint32_t r_ecx asm("ecx") = a2;
-    register uint32_t r_edx asm("edx") = a3;
-    register uint32_t r_esi asm("esi") = a4;
-    register uint32_t r_edi asm("edi") = a5;
-
-    // perform software interrupt
-    __asm__ volatile("int $0x80"
-                     : "=a"(ret)
-                     : "a"(r_eax), "b"(r_ebx), "c"(r_ecx), "d"(r_edx), "S"(r_esi), "D"(r_edi)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "b"(a1), "c"(a2), "d"(a3), "S"(a4), "D"(a5) : "memory");
 
     return ret;
 }
@@ -212,9 +198,11 @@ int sys_copy_file_range(struct syscall_args* args) {
         log("sys: wrong arguments passed to sys_copy_file_range", RED);
         return -1;
     }
+
     int fd_in = (int) args->a1;
     int fd_out = (int) args->a2;
     size_t count = (size_t) args->a3;
+
     if (args->a4 || args->a5) {
         log("sys: invalid args passed to sys_copy_file_range", RED);
         return -1;
@@ -332,9 +320,11 @@ int sys_write(struct syscall_args* args) {
     if (fd < 0 || fd >= MAX_PROC_FDS) {
         return -1;
     }
+
     if (!buf) {
         return -1;
     }
+
     if (fd == 1) {
         echo(buf, WHITE);
         return 0;
@@ -342,9 +332,10 @@ int sys_write(struct syscall_args* args) {
 
     // fetch the file descriptor
     struct vfs_file_descriptor* desc = &proc->fds[fd];
-    if (!desc || !desc->node)
-        return -1;
 
+    if (!desc || !desc->node) {
+        return -1;
+    }
     return vfs_write(desc->node, buf, count);
 }
 
@@ -364,9 +355,13 @@ int sys_print(struct syscall_args* args) {
     }
 
     size_t len = flopstrlen(str_ptr);
-    if (len == 0)
-        return 0;
 
+    if (len == 0) {
+        return 0;
+    }
+
+    // printing to stdout is done with sys_write(fd = 1, buf = str_ptr, count = len)
+    // TODO: make this cleaner
     struct syscall_args print_args = {.a1 = 1, .a2 = (uint32_t) str_ptr, .a3 = len};
     return sys_write(&print_args);
 }
@@ -389,22 +384,27 @@ static int sys_mmap_internal_alloc(
     // iterate through each page and allocate + map
     for (uintptr_t cur_vaddr = base_vaddr; cur_vaddr < end_vaddr; cur_vaddr += PAGE_SIZE) {
         void* phys_page = pmm_alloc_page();
+
         if (!phys_page) {
             sys_mmap_internal_rb(region, base_vaddr, cur_vaddr);
             return -1;
         }
+
         // if we have a node, read data into the page
         if (node) {
             int read_bytes = vfs_read(node, phys_page, PAGE_SIZE);
             // zero out the rest of the page if we read less than a page
             if (read_bytes < 0) {
                 uint8_t* bp = (uint8_t*) phys_page;
+
                 for (size_t i = 0; i < PAGE_SIZE; i++) {
                     bp[i] = 0;
                 };
-                // partially read page
-            } else if ((size_t) read_bytes < PAGE_SIZE) {
+            }
+
+            else if ((size_t) read_bytes < PAGE_SIZE) {
                 uint8_t* bp = (uint8_t*) phys_page;
+
                 for (size_t i = read_bytes; i < PAGE_SIZE; i++) {
                     bp[i] = 0;
                 }
@@ -414,6 +414,7 @@ static int sys_mmap_internal_alloc(
         // no node, just zero the page
         else {
             uint8_t* bp = (uint8_t*) phys_page;
+
             for (size_t i = 0; i < PAGE_SIZE; i++) {
                 bp[i] = 0;
             }
@@ -433,8 +434,11 @@ static int sys_mmap_internal_get_va(vmm_region_t* region, uint32_t requested_va,
     // look for a free virtual range
     if (requested_va == 0) {
         uint32_t found_va = vmm_find_free_range(region, length);
-        if (!found_va)
+
+        if (!found_va) {
             return -1;
+        }
+
         *out_va = found_va;
         return 0;
     }
@@ -676,6 +680,7 @@ int sys_stat(struct syscall_args* args) {
 
     char* path = (char*) args->a1;
     stat_t* st = (stat_t*) args->a2;
+
     if (args->a3 || args->a4 || args->a5) {
         log("sys: invalid args passed to sys_stat", RED);
         return -1;

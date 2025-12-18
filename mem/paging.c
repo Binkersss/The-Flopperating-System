@@ -175,36 +175,47 @@ static int paging_init_paging_stack() {
 
 void paging_init(void) {
     int page_directory_status = paging_init_page_directory();
+
     if (page_directory_status < 0) {
         log("paging_init_page_directory failed\n", RED);
         return;
     }
+
     int page_tables_status = paging_init_page_tables();
+
     if (page_tables_status < 0) {
         log("paging_init_page_tables failed\n", RED);
         return;
     }
+
     int paging_recusrive_pagemap_status = paging_init_recursive_mapping();
+
     if (paging_recusrive_pagemap_status < 0) {
         log("paging_init_recursive_mapping failed\n", RED);
         return;
     }
+
     current_pg_dir = pd;
     load_pd(pd);
     log("page directory loaded\n", YELLOW);
     enable_paging(0, 0);
     log("paging enabled\n", YELLOW);
+
     int paging_setup_stack_status = paging_init_paging_stack();
+
     if (paging_setup_stack_status < 0) {
         log("paging_init_paging_stack failed\n", RED);
         return;
     }
+
     current_pg_dir = (uint32_t*) pg_dir;
+
     if (page_directory_status < 0 || page_tables_status < 0 || paging_recusrive_pagemap_status < 0 ||
         paging_setup_stack_status < 0) {
         log("paging_init: Initialization failed\n", RED);
         __asm__ volatile("hlt");
         return;
     }
+
     log("paging: init - ok\n", YELLOW);
 }

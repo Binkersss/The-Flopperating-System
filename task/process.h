@@ -16,6 +16,7 @@ typedef signed int pid_t;
 typedef int uid_t;
 typedef struct thread_list thread_list_t;
 extern process_t* current_process;
+#define MAX_PROCESSES 256
 
 typedef enum process_state {
     RUNNING,

@@ -1,17 +1,3 @@
-/*
-
-Copyright 2024, 2025 Amar Djulovic <aaamargml@gmail.com>
-
-This file is part of FloppaOS.
-
-FloppaOS is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-FloppaOS is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License along with FloppaOS. If not, see <https://www.gnu.org/licenses/>.
-
-*/
-
 #include <stdint.h>
 #include "pmm.h"
 #include "vmm.h"
@@ -25,7 +11,7 @@ extern uint32_t* pg_tbls;
 extern uint32_t* current_pg_dir;
 
 static vmm_region_t* region_list = 0;
-static vmm_region_t kernel_region;
+vmm_region_t kernel_region;
 static vmm_region_t* current_region = NULL;
 
 static inline uint32_t pd_index(uintptr_t va) {
@@ -43,24 +29,32 @@ static inline uint32_t page_offset(uintptr_t va) {
 #define RECURSIVE_ADDR 0xFFC00000
 #define RECURSIVE_PT(pdi) ((uint32_t*) (RECURSIVE_ADDR + (pdi) *PAGE_SIZE))
 
-// allocate a virtual address
 uintptr_t vmm_alloc(vmm_region_t* region, size_t pages, uint32_t flags) {
-    uintptr_t va = vmm_find_free_range(region, pages);
-    if (!va)
-        return 0;
+    log("vmm_alloc: start\n", GREEN);
+    if (!region || pages == 0) {
+        log("vmm_alloc: invalid region or zero pages\n", RED);
+        return (uintptr_t) (-1);
+    }
+
+    uintptr_t va = region->next_free_va ? region->next_free_va : region->base_va;
 
     for (size_t i = 0; i < pages; i++) {
         uintptr_t pa = (uintptr_t) pmm_alloc_page();
         if (!pa) {
+            log_uint("vmm_alloc: pmm_alloc_page failed at page index: ", i);
+            log_address("vmm_alloc: unmapping allocated range starting virtual address: ", va);
             vmm_unmap_range(region, va, i);
-            return 0;
+            return (uintptr_t) (-1);
         }
         vmm_map(region, va + i * PAGE_SIZE, pa, flags);
     }
+
+    region->next_free_va = va + pages * PAGE_SIZE;
+
+    log("vmm_alloc: success\n", GREEN);
     return va;
 }
 
-// free virtual address
 void vmm_free(vmm_region_t* region, uintptr_t va, size_t pages) {
     for (size_t i = 0; i < pages; i++) {
         uintptr_t pa = vmm_resolve(region, va + i * PAGE_SIZE);
@@ -71,56 +65,47 @@ void vmm_free(vmm_region_t* region, uintptr_t va, size_t pages) {
     }
 }
 
-// map a physical page at address pa to virtual address va
 int vmm_map(vmm_region_t* region, uintptr_t va, uintptr_t pa, uint32_t flags) {
     uint32_t pdi = pd_index(va);
     uint32_t pti = pt_index(va);
 
     if (!(region->pg_dir[pdi] & PAGE_PRESENT)) {
-        // allocate new pt if not present
         uintptr_t pt_phys = (uintptr_t) pmm_alloc_page();
-        if (!pt_phys)
+        if (!pt_phys) {
             return -1;
-
+        }
         region->pg_dir[pdi] = (pt_phys & PAGE_MASK) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
-        // zero new pt
         flop_memset(RECURSIVE_PT(pdi), 0, PAGE_SIZE);
     }
 
     uint32_t* pt = RECURSIVE_PT(pdi);
     pt[pti] = (pa & PAGE_MASK) | flags | PAGE_PRESENT;
-
     invlpg((void*) va);
     return 0;
 }
 
-// unmap a physical page at virtual address va
 int vmm_unmap(vmm_region_t* region, uintptr_t va) {
     uint32_t pdi = pd_index(va);
     uint32_t pti = pt_index(va);
-
-    if (!(region->pg_dir[pdi] & PAGE_PRESENT))
+    if (!(region->pg_dir[pdi] & PAGE_PRESENT)) {
         return -1;
-
+    }
     uint32_t* pt = RECURSIVE_PT(pdi);
     pt[pti] = 0;
-
     invlpg((void*) va);
     return 0;
 }
 
-// resolve a virtual address to a physical address
 uintptr_t vmm_resolve(vmm_region_t* region, uintptr_t va) {
     uint32_t pdi = pd_index(va);
     uint32_t pti = pt_index(va);
-
-    if (!(region->pg_dir[pdi] & PAGE_PRESENT))
+    if (!(region->pg_dir[pdi] & PAGE_PRESENT)) {
         return 0;
-
+    }
     uint32_t* pt = RECURSIVE_PT(pdi);
-    if (!(pt[pti] & PAGE_PRESENT))
+    if (!(pt[pti] & PAGE_PRESENT)) {
         return 0;
-
+    }
     return (pt[pti] & PAGE_MASK) | (va & ~PAGE_MASK);
 }
 
@@ -135,64 +120,85 @@ void region_remove(vmm_region_t* region) {
         if (*iter == region) {
             *iter = region->next;
             break;
+        } else {
+            iter = &(*iter)->next;
         }
-        iter = &(*iter)->next;
     }
 }
 
 vmm_region_t* vmm_region_create(size_t initial_pages, uint32_t flags, uintptr_t* out_va) {
+    log("vmm_region_create: start\n", GREEN);
+
     uintptr_t dir_phys = (uintptr_t) pmm_alloc_page();
-    if (!dir_phys)
+    if (!dir_phys) {
+        log("vmm_region_create: pmm_alloc_page failed\n", RED);
         return NULL;
+    }
+    log_address("vmm_region_create: allocated page directory at phys: ", dir_phys);
+
     uint32_t* dir = (uint32_t*) dir_phys;
     flop_memset(dir, 0, PAGE_SIZE);
-    dir[RECURSIVE_PDE] = (dir_phys & PAGE_MASK) | PAGE_PRESENT | PAGE_RW;
+
+    dir[RECURSIVE_PDE] = (dir_phys & PAGE_MASK) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+
     vmm_region_t* region = (vmm_region_t*) kmalloc(sizeof(vmm_region_t));
     if (!region) {
+        log("vmm_region_create: kmalloc failed\n", RED);
         pmm_free_page((void*) dir_phys);
         return NULL;
     }
+    log_address("vmm_region_create: allocated vmm_region_t at: ", (uintptr_t) region);
+
     region->pg_dir = dir;
     region->next = NULL;
     region->random_table = NULL;
     region->random_count = 0;
     region->random_capacity = 0;
+    region->base_va = USER_SPACE_START;
+    region->next_free_va = region->base_va;
+
     region_insert(region);
-    if (initial_pages > 0 && out_va) {
+    log("vmm_region_create: inserted region into global list\n", GREEN);
+
+    if ((initial_pages > 0) && out_va) {
         uintptr_t va = vmm_alloc(region, initial_pages, flags);
-        if (!va) {
+        if (va == (uintptr_t) (-1)) {
+            log("vmm_region_create: vmm_alloc failed for initial pages\n", RED);
+
             region_remove(region);
             kfree(region, sizeof(vmm_region_t));
             pmm_free_page((void*) dir_phys);
             return NULL;
+        } else {
+            *out_va = va;
+            log_uint("vmm_region_create: pages allocated: ", initial_pages);
+            log_address("vmm_region_create: starting VA: ", va);
         }
-        *out_va = va;
     }
 
+    log("vmm_region_create: success\n", GREEN);
     return region;
 }
 
 void vmm_region_destroy(vmm_region_t* region) {
-    if (!region)
+    if (!region) {
         return;
-    // TODO: unmap and free all pages owned by this region here
-    // must be done by caller for now
+    }
     region_remove(region);
-
     if (region->random_table) {
         kfree(region->random_table, region->random_capacity * sizeof(aslr_entry_t));
         region->random_table = NULL;
         region->random_count = 0;
         region->random_capacity = 0;
     }
-
     pmm_free_page((void*) region->pg_dir);
     kfree(region, sizeof(vmm_region_t));
 }
 
 void vmm_switch(vmm_region_t* region) {
-    if (!region)
+    if (!region) {
         return;
+    }
     current_region = region;
     current_pg_dir = region->pg_dir;
     load_pd(region->pg_dir);
@@ -204,99 +210,86 @@ void vmm_init() {
     current_pg_dir = pg_dir;
     pg_dir[RECURSIVE_PDE] = ((uintptr_t) pg_dir & PAGE_MASK) | PAGE_PRESENT | PAGE_RW;
     region_insert(&kernel_region);
-    // we do not need to load the kernel region because it has
-    // been loaded into cr3 by the paging init function.
-    // however, we set current_region to it.
     log("vmm: init - ok\n", GREEN);
 }
 
 uint32_t* vmm_new_copied_pgdir() {
     uintptr_t new_dir_phys = (uintptr_t) pmm_alloc_page();
-    if (!new_dir_phys)
+    if (!new_dir_phys) {
         return 0;
+    }
     uint32_t* new_dir = (uint32_t*) new_dir_phys;
     flop_memset(new_dir, 0, PAGE_SIZE);
     return new_dir;
 }
 
-// copy a region's mappings into a new region and add it to the linked list of virtual regions
 vmm_region_t* vmm_copy_pagemap(vmm_region_t* src) {
     uint32_t* new_dir = vmm_new_copied_pgdir();
+    if (!new_dir) {
+        return 0;
+    }
     vmm_region_t* dst = (vmm_region_t*) kmalloc(sizeof(vmm_region_t));
+    if (!dst) {
+        return 0;
+    }
     dst->pg_dir = new_dir;
     dst->next = 0;
+    dst->base_va = src->base_va;
+    dst->next_free_va = src->next_free_va;
 
-    // pt allocation
     for (int pdi = 0; pdi < 1024; pdi++) {
-        // do it
-        if (!(src->pg_dir[pdi] & PAGE_PRESENT))
+        if (!(src->pg_dir[pdi] & PAGE_PRESENT)) {
             continue;
-        uintptr_t pt_phys = (uintptr_t) pmm_alloc_page();
-
-        // fall back if page alloc fails (important)
-        if (!pt_phys) {
-            vmm_region_destroy(dst);
-            return 0;
-        }
-
-        // determine src pt (index pdi*1024 in pg_tbls)
-        uint32_t* src_pt = &pg_tbls[pdi * PAGE_ENTRIES];
-
-        // set target pt to page we allocated
-        uint32_t* dst_pt = (uint32_t*) pt_phys;
-        flop_memset(dst_pt, 0, PAGE_SIZE);
-
-        // frame allocation
-        for (int pti = 0; pti < PAGE_ENTRIES; pti++) {
-            // check if page is ok
-            if (!(src_pt[pti] & PAGE_PRESENT))
-                continue;
-            uintptr_t new_page = (uintptr_t) pmm_alloc_page();
-
-            // before copying frame we must check if the new page exists
-            // fall back if frame allocation doesnt work out
-            if (!new_page) {
+        } else {
+            uintptr_t pt_phys = (uintptr_t) pmm_alloc_page();
+            if (!pt_phys) {
                 vmm_region_destroy(dst);
                 return 0;
             }
+            uint32_t* src_pt = &pg_tbls[pdi * PAGE_ENTRIES];
+            uint32_t* dst_pt = (uint32_t*) pt_phys;
+            flop_memset(dst_pt, 0, PAGE_SIZE);
 
-            // copy frame
-
-            flop_memcpy((void*) new_page, (void*) (src_pt[pti] & PAGE_MASK), PAGE_SIZE);
-            dst_pt[pti] = (new_page & PAGE_MASK) | (src_pt[pti] & ~PAGE_MASK);
+            for (int pti = 0; pti < PAGE_ENTRIES; pti++) {
+                if (!(src_pt[pti] & PAGE_PRESENT)) {
+                    continue;
+                } else {
+                    uintptr_t new_page = (uintptr_t) pmm_alloc_page();
+                    if (!new_page) {
+                        vmm_region_destroy(dst);
+                        return 0;
+                    } else {
+                        flop_memcpy((void*) new_page, (void*) (src_pt[pti] & PAGE_MASK), PAGE_SIZE);
+                        dst_pt[pti] = (new_page & PAGE_MASK) | (src_pt[pti] & ~PAGE_MASK);
+                    }
+                }
+            }
+            new_dir[pdi] = (pt_phys & PAGE_MASK) | (src->pg_dir[pdi] & ~PAGE_MASK);
         }
-
-        new_dir[pdi] = (pt_phys & PAGE_MASK) | (src->pg_dir[pdi] & ~PAGE_MASK);
     }
 
-    // point last entry of the new dir to itself (recursively)
     new_dir[RECURSIVE_PDE] = ((uintptr_t) new_dir & PAGE_MASK) | PAGE_PRESENT | PAGE_RW;
-
-    // insert new region into linked list
     region_insert(dst);
     return dst;
 }
 
 void vmm_nuke_pagemap(vmm_region_t* region) {
     for (int pdi = 0; pdi < 1024; pdi++) {
-        if (!(region->pg_dir[pdi] & PAGE_PRESENT))
+        if (!(region->pg_dir[pdi] & PAGE_PRESENT)) {
             continue;
-
-        uint32_t* pt = &pg_tbls[pdi * PAGE_ENTRIES];
-        for (int pti = 0; pti < PAGE_ENTRIES; pti++) {
-            if (pt[pti] & PAGE_PRESENT) {
-                uintptr_t pa = pt[pti] & PAGE_MASK;
-                pmm_free_page((void*) pa);
+        } else {
+            uint32_t* pt = &pg_tbls[pdi * PAGE_ENTRIES];
+            for (int pti = 0; pti < PAGE_ENTRIES; pti++) {
+                if (pt[pti] & PAGE_PRESENT) {
+                    pmm_free_page((void*) (pt[pti] & PAGE_MASK));
+                }
             }
+            uintptr_t pt_phys = region->pg_dir[pdi] & PAGE_MASK;
+            pmm_free_page((void*) pt_phys);
         }
-
-        uintptr_t pt_phys = region->pg_dir[pdi] & PAGE_MASK;
-        pmm_free_page((void*) pt_phys);
     }
-
     uintptr_t dir_phys = (uintptr_t) region->pg_dir;
     pmm_free_page((void*) dir_phys);
-
     region_remove(region);
     kfree(region, sizeof(vmm_region_t));
 }
@@ -304,9 +297,11 @@ void vmm_nuke_pagemap(vmm_region_t* region) {
 vmm_region_t* vmm_find_region(uintptr_t va) {
     vmm_region_t* iter = region_list;
     while (iter) {
-        if (vmm_resolve(iter, va))
+        if (vmm_resolve(iter, va)) {
             return iter;
-        iter = iter->next;
+        } else {
+            iter = iter->next;
+        }
     }
     return 0;
 }
@@ -323,16 +318,18 @@ size_t vmm_count_regions() {
 
 int vmm_map_range(vmm_region_t* region, uintptr_t va, uintptr_t pa, size_t pages, uint32_t flags) {
     for (size_t i = 0; i < pages; i++) {
-        if (vmm_map(region, va + i * PAGE_SIZE, pa + i * PAGE_SIZE, flags) < 0)
+        if (vmm_map(region, va + i * PAGE_SIZE, pa + i * PAGE_SIZE, flags) < 0) {
             return -1;
+        }
     }
     return 0;
 }
 
 int vmm_unmap_range(vmm_region_t* region, uintptr_t va, size_t pages) {
     for (size_t i = 0; i < pages; i++) {
-        if (vmm_unmap(region, va + i * PAGE_SIZE) < 0)
+        if (vmm_unmap(region, va + i * PAGE_SIZE) < 0) {
             return -1;
+        }
     }
     return 0;
 }
@@ -340,11 +337,13 @@ int vmm_unmap_range(vmm_region_t* region, uintptr_t va, size_t pages) {
 int vmm_protect(vmm_region_t* region, uintptr_t va, uint32_t flags) {
     uint32_t pdi = pd_index(va);
     uint32_t pti = pt_index(va);
-    if (!(region->pg_dir[pdi] & PAGE_PRESENT))
+    if (!(region->pg_dir[pdi] & PAGE_PRESENT)) {
         return -1;
+    }
     uint32_t* pt = &pg_tbls[pdi * PAGE_ENTRIES];
-    if (!(pt[pti] & PAGE_PRESENT))
+    if (!(pt[pti] & PAGE_PRESENT)) {
         return -1;
+    }
     pt[pti] = (pt[pti] & PAGE_MASK) | flags | PAGE_PRESENT;
     invlpg((void*) va);
     return 0;
@@ -352,8 +351,9 @@ int vmm_protect(vmm_region_t* region, uintptr_t va, uint32_t flags) {
 
 uint32_t* vmm_get_pt(vmm_region_t* region, uintptr_t va) {
     uint32_t pdi = pd_index(va);
-    if (!(region->pg_dir[pdi] & PAGE_PRESENT))
+    if (!(region->pg_dir[pdi] & PAGE_PRESENT)) {
         return 0;
+    }
     return &pg_tbls[pdi * PAGE_ENTRIES];
 }
 
@@ -364,21 +364,19 @@ uint32_t vmm_get_pde(vmm_region_t* region, uintptr_t va) {
 uintptr_t vmm_find_free_range(vmm_region_t* region, size_t pages) {
     size_t run = 0;
     uintptr_t start = 0;
-
     for (uintptr_t va = 0; va < 0xFFFFFFFF; va += PAGE_SIZE) {
         uint32_t* pt = vmm_get_pt(region, va);
         uint32_t pde = vmm_get_pde(region, va);
-
         int used = 0;
         if (pde & PAGE_PRESENT) {
             if (pt && (pt[pt_index(va)] & PAGE_PRESENT)) {
                 used = 1;
             }
         }
-
         if (!used) {
-            if (run == 0)
+            if (run == 0) {
                 start = va;
+            }
             run++;
             if (run >= pages) {
                 return start;
@@ -387,8 +385,7 @@ uintptr_t vmm_find_free_range(vmm_region_t* region, size_t pages) {
             run = 0;
         }
     }
-
-    return 0; // no range found
+    return 0;
 }
 
 int vmm_map_shared(

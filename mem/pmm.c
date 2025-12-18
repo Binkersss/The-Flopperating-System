@@ -92,53 +92,8 @@ static inline uintptr_t align_up(uintptr_t x, uintptr_t a) {
 }
 
 static uintptr_t pmm_kernel_end(void) {
-    extern char _kernel_end;
+    extern char _kernel_end; // from linker
     return (uintptr_t) &_kernel_end;
-}
-
-static bool pmm_has_mmap(multiboot_info_t* mb) {
-    return mb && (mb->flags & MULTIBOOT_INFO_MEM_MAP);
-}
-
-static bool pmm_has_mods(multiboot_info_t* mb) {
-    return mb && (mb->flags & MULTIBOOT_INFO_MODS);
-}
-
-static uint8_t* pmm_mmap_begin(multiboot_info_t* mb) {
-    return (uint8_t*) (uintptr_t) mb->mmap_addr;
-}
-
-static uint8_t* pmm_mmap_end(multiboot_info_t* mb) {
-    return pmm_mmap_begin(mb) + mb->mmap_length;
-}
-
-static multiboot_memory_map_t* pmm_mmap_entry(uint8_t* ptr) {
-    return (multiboot_memory_map_t*) (void*) ptr;
-}
-
-static bool pmm_mmap_entry_valid(multiboot_memory_map_t* entry) {
-    return entry && entry->size != 0;
-}
-
-static uint8_t* pmm_mmap_next(multiboot_memory_map_t* entry) {
-    return (uint8_t*) entry + entry->size + sizeof(entry->size);
-}
-
-static bool pmm_region_usable(multiboot_memory_map_t* entry) {
-    return entry->type == MULTIBOOT_MEMORY_AVAILABLE && entry->addr >= 0x100000ULL;
-}
-
-static uintptr_t pmm_align(uint32_t x) {
-    return align_up(x, PAGE_SIZE);
-}
-
-static uintptr_t pmm_region_start(multiboot_memory_map_t* entry) {
-    return pmm_align((uintptr_t) entry->addr);
-}
-
-static uintptr_t pmm_region_end(multiboot_memory_map_t* entry) {
-    uintptr_t end = (uintptr_t) entry->addr + (uintptr_t) entry->len;
-    return end & ~(PAGE_SIZE - 1);
 }
 
 static uintptr_t pmm_reserved_top(multiboot_info_t* mb) {
@@ -150,13 +105,13 @@ static uintptr_t pmm_reserved_top(multiboot_info_t* mb) {
             top = a;
     }
 
-    if (pmm_has_mmap(mb)) {
+    if (PMM_HAS_MMAP(mb)) {
         uintptr_t t = (uintptr_t) mb->mmap_addr + (uintptr_t) mb->mmap_length;
         if (t > top)
             top = t;
     }
 
-    if (pmm_has_mods(mb)) {
+    if (PMM_HAS_MODS(mb)) {
         multiboot_module_t* m = (multiboot_module_t*) (uintptr_t) mb->mods_addr;
         for (uint32_t i = 0; i < mb->mods_count; i++) {
             uintptr_t end = (uintptr_t) m[i].mod_end;
@@ -165,31 +120,31 @@ static uintptr_t pmm_reserved_top(multiboot_info_t* mb) {
         }
     }
 
-    return pmm_align(top);
+    return PMM_ALIGN(top);
 }
 
 static uintptr_t pmm_find_page_info_placement(multiboot_info_t* mb, uintptr_t reserved_top, size_t bytes) {
-    if (!pmm_has_mmap(mb))
+    if (!PMM_HAS_MMAP(mb))
         return 0;
 
-    uintptr_t need = pmm_align(bytes);
-    uint8_t* page = pmm_mmap_begin(mb);
-    uint8_t* entry = pmm_mmap_end(mb);
+    uintptr_t need = PMM_ALIGN(bytes);
+    uint8_t* page = PMM_MMAP_BEGIN(mb);
+    uint8_t* entry = PMM_MMAP_END(mb);
 
     while (page < entry) {
-        multiboot_memory_map_t* mm = pmm_mmap_entry(page);
-        if (!pmm_mmap_entry_valid(mm))
+        multiboot_memory_map_t* mm = PMM_MMAP_ENTRY(page);
+        if (!PMM_MMAP_ENTRY_VALID(mm))
             break;
 
-        if (pmm_region_usable(mm)) {
-            uintptr_t rs = pmm_region_start(mm);
-            uintptr_t re = pmm_region_end(mm);
-            uintptr_t start = pmm_align(reserved_top > rs ? reserved_top : rs);
+        if (PMM_REGION_USABLE(mm)) {
+            uintptr_t rs = PMM_REGION_START(mm);
+            uintptr_t re = PMM_REGION_END(mm);
+            uintptr_t start = PMM_ALIGN(reserved_top > rs ? reserved_top : rs);
             if (start < re && (re - start) >= need)
                 return start;
         }
 
-        page = pmm_mmap_next(mm);
+        page = PMM_MMAP_NEXT(mm);
     }
     return 0;
 }
@@ -212,8 +167,8 @@ static bool pmm_skip_addr(uintptr_t addr) {
 
 static size_t pmm_process_region(multiboot_memory_map_t* mm, uintptr_t s, uintptr_t entry) {
     size_t added = 0;
-    uintptr_t rs = pmm_region_start(mm);
-    uintptr_t re = pmm_region_end(mm);
+    uintptr_t rs = PMM_REGION_START(mm);
+    uintptr_t re = PMM_REGION_END(mm);
 
     for (uintptr_t a = rs; a < re; a += PAGE_SIZE) {
         if (pmm_addr_in_pageinfo(a, s, entry))
@@ -233,31 +188,31 @@ static size_t pmm_process_region(multiboot_memory_map_t* mm, uintptr_t s, uintpt
 }
 
 void pmm_create_free_list(multiboot_info_t* mb) {
-    if (!pmm_has_mmap(mb))
+    if (!PMM_HAS_MMAP(mb))
         return;
 
     uintptr_t page_info_slot = (uintptr_t) buddy.page_info;
-    uintptr_t page_info_entry = page_info_slot + pmm_align(buddy.total_pages * sizeof(struct page));
+    uintptr_t page_info_entry = page_info_slot + PMM_ALIGN(buddy.total_pages * sizeof(struct page));
 
-    uint8_t* page = pmm_mmap_begin(mb);
-    uint8_t* end = pmm_mmap_end(mb);
+    uint8_t* page = PMM_MMAP_BEGIN(mb);
+    uint8_t* end = PMM_MMAP_END(mb);
 
     size_t added = 0;
 
     while (page < end) {
-        multiboot_memory_map_t* mm = pmm_mmap_entry(page);
-        if (!pmm_mmap_entry_valid(mm))
+        multiboot_memory_map_t* mm = PMM_MMAP_ENTRY(page);
+        if (!PMM_MMAP_ENTRY_VALID(mm))
             break;
 
-        if (pmm_region_usable(mm))
+        if (PMM_REGION_USABLE(mm))
             added += pmm_process_region(mm, page_info_slot, page_info_entry);
 
-        page = pmm_mmap_next(mm);
+        page = PMM_MMAP_NEXT(mm);
     }
 }
 
 uint64_t pmm_count_usable_pages(multiboot_info_t* mb, uintptr_t* out_first_usable, uint64_t* out_total_bytes) {
-    if (!mb || !(mb->flags & MULTIBOOT_INFO_MEM_MAP)) {
+    if (!PMM_HAS_MMAP(mb)) {
         if (out_first_usable)
             *out_first_usable = 0;
         if (out_total_bytes)
@@ -268,17 +223,17 @@ uint64_t pmm_count_usable_pages(multiboot_info_t* mb, uintptr_t* out_first_usabl
     uint64_t total_bytes = 0;
     uintptr_t first_usable = 0;
 
-    uint8_t* ptr = pmm_mmap_begin(mb);
-    uint8_t* end = pmm_mmap_end(mb);
+    uint8_t* ptr = PMM_MMAP_BEGIN(mb);
+    uint8_t* end = PMM_MMAP_END(mb);
 
     while (ptr < end) {
-        multiboot_memory_map_t* mm = pmm_mmap_entry(ptr);
-        if (!pmm_mmap_entry_valid(mm))
+        multiboot_memory_map_t* mm = PMM_MMAP_ENTRY(ptr);
+        if (!PMM_MMAP_ENTRY_VALID(mm))
             break;
 
-        if (pmm_region_usable(mm)) {
-            uintptr_t rs = pmm_region_start(mm);
-            uintptr_t re = pmm_region_end(mm);
+        if (PMM_REGION_USABLE(mm)) {
+            uintptr_t rs = PMM_REGION_START(mm);
+            uintptr_t re = PMM_REGION_END(mm);
 
             if (re > rs) {
                 uint64_t region_bytes = (uint64_t) (re - rs);
@@ -289,7 +244,7 @@ uint64_t pmm_count_usable_pages(multiboot_info_t* mb, uintptr_t* out_first_usabl
             }
         }
 
-        ptr = pmm_mmap_next(mm);
+        ptr = PMM_MMAP_NEXT(mm);
     }
 
     if (out_first_usable)
@@ -406,7 +361,22 @@ static struct page* pmm_fetch_order_block(uint32_t order) {
 static void pmm_determine_split(struct page* blk, uint32_t from_order, uint32_t to_order) {
     while (from_order > to_order) {
         from_order--;
-        pmm_buddy_split(blk->address, from_order);
+
+        uintptr_t split_size = ((uintptr_t) 1 << from_order) * PAGE_SIZE;
+        uintptr_t buddy_addr = blk->address + split_size;
+
+        struct page* right = phys_to_page_index(buddy_addr);
+        if (!right)
+            return;
+
+        right->address = buddy_addr;
+        right->order = from_order;
+        right->is_free = 1;
+
+        right->next = buddy.free_list[from_order];
+        buddy.free_list[from_order] = right;
+
+        blk->order = from_order;
     }
 }
 

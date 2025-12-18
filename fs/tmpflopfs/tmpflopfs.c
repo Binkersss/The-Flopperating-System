@@ -6,6 +6,7 @@
 #include "../../mem/utils.h"
 #include "../../mem/paging.h"
 #include "../../mem/vmm.h"
+#include "../../mem/pmm.h"
 #include "../../drivers/vga/vgahandler.h"
 #include "../../lib/str.h"
 #include "../../task/sync/spinlock.h"

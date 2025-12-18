@@ -20,6 +20,7 @@ You should have received a copy of the GNU General Public License along with Flo
 #include "../mem/vmm.h"
 #include "../mem/utils.h"
 #include "../fs/vfs/vfs.h"
+#include "../fs/procfs/procfs.h"
 #include "../lib/logging.h"
 #include "../lib/str.h"
 #include "../lib/refcount.h"
@@ -152,20 +153,25 @@ static void proc_family_transfer_children(process_t* old_parent, process_t* new_
     old_parent->children = NULL;
 }
 
+static process_t proc_table_static[MAX_PROCESSES];
+
 static process_t* proc_alloc_process_struct() {
-    process_t* process = (process_t*) kmalloc(sizeof(process_t));
-    if (!process)
-        return NULL;
-    flop_memset(process, 0, sizeof(process_t));
-    return process;
+    for (int i = 0; i < MAX_PROCESSES; ++i) {
+        if (proc_table_static[i].state == 0) {
+            flop_memset(&proc_table_static[i], 0, sizeof(process_t));
+            return &proc_table_static[i];
+        }
+    }
+    return NULL;
 }
 
+static thread_list_t thread_list_pool[MAX_PROCESSES];
+static size_t thread_list_index = 0;
+
 static thread_list_t* proc_alloc_thread_list() {
-    thread_list_t* thread_list = (thread_list_t*) kmalloc(sizeof(thread_list_t));
-    if (!thread_list)
+    if (thread_list_index >= MAX_PROCESSES)
         return NULL;
-    flop_memset(thread_list, 0, sizeof(thread_list_t));
-    return thread_list;
+    return &thread_list_pool[thread_list_index++];
 }
 
 static void proc_alloc_assign_ids(process_t* process) {
@@ -317,44 +323,40 @@ int proc_init_process_create_thread(process_t* process,
     return 0;
 }
 
+static char init_process_name_static[] = "init_process";
+
 int proc_init_process_assign_name(process_t* process, const char* name) {
-    char* init_process_name = "init_process";
-    size_t name_len = flopstrlen(init_process_name) + 1;
-    process->name = (char*) kmalloc(name_len);
-    if (!process->name) {
-        return -1;
-    }
-    flopstrcopy(process->name, init_process_name, name_len);
+    process->name = init_process_name_static;
     return 0;
 }
 
 int proc_create_init_process() {
     spinlock(&proc_tbl->proc_table_lock);
+
     init_process = proc_alloc();
     if (!init_process) {
+        log("init_process alloc failed\n", RED);
         spinlock_unlock(&proc_tbl->proc_table_lock, true);
         return -1;
     }
 
-    // processes need to be in the embryo state
-    // to follow posix :^)
     init_process->state = EMBRYO;
     spinlock_unlock(&proc_tbl->proc_table_lock, true);
 
     if (proc_init_process_zero_ids(init_process) < 0) {
+        log("init_process zero_ids failed\n", RED);
         proc_init_process_free_data_structures(init_process);
         return -1;
     }
 
-    // processes do heap allocations for names
-    // kmalloc is thread safe so this is ok
-    // i'd rather do this than some preallocated buffer
     if (proc_init_process_assign_name(init_process, "init_process") < 0) {
+        log("init_process assign_name failed\n", RED);
         proc_init_process_free_data_structures(init_process);
         return -1;
     }
-    // setup the address space
+
     if (proc_init_process_create_region(init_process, 4) < 0) {
+        log("init_process create_region failed\n", RED);
         proc_init_process_free_data_structures(init_process);
         return -1;
     }
@@ -362,14 +364,18 @@ int proc_create_init_process() {
     init_process->mem_usage = 4 * PAGE_SIZE;
 
     if (proc_init_process_family_create(init_process) < 0) {
+        log("init_process family_create failed\n", RED);
         proc_init_process_free_data_structures(init_process);
         return -1;
     }
 
     init_process->cwd = NULL;
 
-    vfs_mount("procfs", "/process/", VFS_TYPE_PROCFS);
+    procfs_init();
+    procfs_add_entry("init_process", VFS_TYPE_PROCFS);
+
     if (proc_init_process_create_thread(init_process, proc_init_process_dummy_entry, 0, "init_thread") < 0) {
+        log("init_process create_thread failed\n", RED);
         proc_init_process_free_data_structures(init_process);
         return -1;
     }
@@ -378,6 +384,7 @@ int proc_create_init_process() {
     init_process->state = RUNNING;
     spinlock_unlock(&proc_tbl->proc_table_lock, true);
 
+    log("init_process successfully created\n", GREEN);
     return 0;
 }
 
@@ -403,11 +410,14 @@ int proc_kill(process_t* process) {
         vfs_close(process->cwd);
     }
 
-    vmm_region_destroy(process->region);
+    vmm_region_destroy(process->region); // TODO: free pages.
+
     kfree(process->name, flopstrlen(process->name) + 1);
     kfree(process->threads, sizeof(thread_list_t));
     kfree(process, sizeof(process_t));
 
+    // NOTE: proc_info_local might not need a lock.
+    // proc_tbl->proc_table_lock needs to exist though.
     spinlock(&proc_tbl->proc_table_lock);
     proc_info_local->process_count--;
     process->state = TERMINATED;
@@ -597,6 +607,8 @@ pid_t proc_fork(process_t* parent) {
         return -1;
     }
 
+    // TODO: figure out a better way to do the name.
+    // allocating for a temporary name seems avoidable
     char* child_name = parent->name ? parent->name : "__embryo_process";
     size_t name_len = flopstrlen(child_name) + 1;
     child->name = (char*) kmalloc(name_len);

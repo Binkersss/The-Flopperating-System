@@ -25,7 +25,7 @@ uint32_t global_tick_count = 0;
 idt_entry_t idt[IDT_SIZE];
 idt_ptr_t idtp;
 
-void init_stack() {
+void interrupts_stack_init() {
     uint32_t stack_top = (uint32_t) (interrupt_stack + ISR_STACK_SIZE);
     __asm__ volatile("mov %0, %%esp" ::"r"(stack_top));
 }
@@ -96,7 +96,7 @@ typedef enum {
     IRQ_UNIMPLEMENTED6 = 15
 } irq_num_t;
 
-void _pic_register_eoi(irq_num_t irq) {
+void pic_register_eio(irq_num_t irq) {
     if (irq >= IRQ_CMOS) {
         outb(PIC2_COMMAND, PIC_EOI);
     } else {
@@ -108,53 +108,53 @@ void _pic_register_eoi(irq_num_t irq) {
 void c_irq0(void) {
     global_tick_count++;
     scheduler_tick();
-    _pic_register_eoi(IRQ_PIT);
+    pic_register_eio(IRQ_PIT);
 }
 
 // keyboard
 void c_irq1(void) {
     // eh
-    _pic_register_eoi(IRQ_KEYBOARD);
+    pic_register_eio(IRQ_KEYBOARD);
 }
 
 /* the following are unimplemented IRQs for now */
 
 // cascade
 void c_irq2(void) {
-    _pic_register_eoi(IRQ_CASCADE);
+    pic_register_eio(IRQ_CASCADE);
 }
 
 // COM2
 void c_irq3(void) {
-    _pic_register_eoi(IRQ_COM2);
+    pic_register_eio(IRQ_COM2);
 }
 
 // COM1
 void c_irq4(void) {
-    _pic_register_eoi(IRQ_COM1);
+    pic_register_eio(IRQ_COM1);
 }
 
 // LPT2
 void c_irq5(void) {
-    _pic_register_eoi(IRQ_LPT2);
+    pic_register_eio(IRQ_LPT2);
 }
 
 // floppy
 void c_irq6(void) {
-    _pic_register_eoi(IRQ_FLOPPY);
+    pic_register_eio(IRQ_FLOPPY);
 }
 
 // LPT1
 void c_irq7(void) {
-    _pic_register_eoi(IRQ_LPT1);
+    pic_register_eio(IRQ_LPT1);
 }
 
 // CMOS
 void c_irq8(void) {
-    _pic_register_eoi(IRQ_CMOS);
+    pic_register_eio(IRQ_CMOS);
 }
 
-void set_idt_entry(int n, uint32_t base, uint16_t sel, uint8_t flags) {
+void idt_set_entry(int n, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[n].base_low = base & 0xFFFF;
     idt[n].base_high = (base >> 16) & 0xFFFF;
     idt[n].sel = sel;
@@ -162,7 +162,7 @@ void set_idt_entry(int n, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[n].flags = flags;
 }
 
-static void _pic_init() {
+static void pic_init() {
     outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
     outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
 
@@ -181,7 +181,7 @@ static void _pic_init() {
     log("pic: init - ok\n", GREEN);
 }
 
-static void _pit_init() {
+static void pit_init() {
     uint16_t divisor = PIT_BASE_FREQUENCY / PIT_FREQUENCY;
 
     outb(PIT_COMMAND_PORT, PIT_COMMAND_MODE);
@@ -194,22 +194,25 @@ static void _pit_init() {
 extern void syscall_routine();
 
 // set idt entries for the isr and irq and load them
-static void _idt_init() {
+static void idt_init() {
     idtp.limit = (sizeof(idt_entry_t) * IDT_SIZE) - 1;
     idtp.base = (uint32_t) &idt;
+
+    // zero entries
     for (size_t i = 0; i < IDT_SIZE; i++) {
-        set_idt_entry(i, 0, 0, 0);
+        idt_set_entry(i, 0, 0, 0);
     }
 
-    set_idt_entry(0, (uint32_t) isr0, KERNEL_CODE_SEGMENT, 0x8E);
-    set_idt_entry(6, (uint32_t) isr6, KERNEL_CODE_SEGMENT, 0x8E);
-    set_idt_entry(13, (uint32_t) isr13, KERNEL_CODE_SEGMENT, 0x8E);
-    set_idt_entry(14, (uint32_t) isr14, KERNEL_CODE_SEGMENT, 0x8E);
+    idt_set_entry(0, (uint32_t) isr0, KERNEL_CODE_SEGMENT, 0x8E);
+    idt_set_entry(6, (uint32_t) isr6, KERNEL_CODE_SEGMENT, 0x8E);
+    idt_set_entry(13, (uint32_t) isr13, KERNEL_CODE_SEGMENT, 0x8E);
+    idt_set_entry(14, (uint32_t) isr14, KERNEL_CODE_SEGMENT, 0x8E);
 
-    set_idt_entry(32, (uint32_t) irq0, KERNEL_CODE_SEGMENT, 0x8E);
-    set_idt_entry(33, (uint32_t) irq1, KERNEL_CODE_SEGMENT, 0x8E);
+    idt_set_entry(32, (uint32_t) irq0, KERNEL_CODE_SEGMENT, 0x8E);
+    idt_set_entry(33, (uint32_t) irq1, KERNEL_CODE_SEGMENT, 0x8E);
 
-    set_idt_entry(80, (uint32_t) syscall_routine, KERNEL_CODE_SEGMENT, 0x8E);
+    // interrupt syscall vector
+    idt_set_entry(80, (uint32_t) syscall_routine, KERNEL_CODE_SEGMENT, 0x8E);
 
     __asm__ volatile("lidt (%0)" ::"r"(&idtp) : "memory");
     __asm__ volatile("sti");
@@ -226,9 +229,9 @@ static void enable_interrupts() {
 
 void interrupts_init() {
     log("initializing interrupts...\n", LIGHT_GRAY);
-    init_stack();
-    _pic_init();
-    _pit_init();
-    _idt_init();
+    interrupts_stack_init();
+    pic_init();
+    pit_init();
+    idt_init();
     log("interrupts: init - ok.\n", GREEN);
 }

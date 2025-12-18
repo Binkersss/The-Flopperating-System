@@ -8,7 +8,17 @@
 #define PAGE_SIZE 4096
 #define PAGE_SHIFT 12
 #define MAX_ORDER 10
-
+#define PMM_HAS_MMAP(mb) ((mb) && ((mb)->flags & MULTIBOOT_INFO_MEM_MAP))
+#define PMM_HAS_MODS(mb) ((mb) && ((mb)->flags & MULTIBOOT_INFO_MODS))
+#define PMM_MMAP_BEGIN(mb) ((uint8_t*) (uintptr_t) (mb)->mmap_addr)
+#define PMM_MMAP_END(mb) (PMM_MMAP_BEGIN(mb) + (mb)->mmap_length)
+#define PMM_MMAP_ENTRY(ptr) ((multiboot_memory_map_t*) (void*) (ptr))
+#define PMM_MMAP_ENTRY_VALID(entry) ((entry) && (entry)->size != 0)
+#define PMM_MMAP_NEXT(entry) ((uint8_t*) (entry) + (entry)->size + sizeof((entry)->size))
+#define PMM_REGION_USABLE(entry) ((entry)->type == MULTIBOOT_MEMORY_AVAILABLE && (entry)->addr >= 0x100000ULL)
+#define PMM_ALIGN(x) (align_up((x), PAGE_SIZE))
+#define PMM_REGION_START(entry) (PMM_ALIGN((uintptr_t) (entry)->addr))
+#define PMM_REGION_END(entry) (((uintptr_t) (entry)->addr + (uintptr_t) (entry)->len) & ~(PAGE_SIZE - 1))
 #define PAGE_SIZE 4096
 
 struct page {

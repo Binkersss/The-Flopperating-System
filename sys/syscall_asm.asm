@@ -21,7 +21,7 @@ syscall_routine:
     push eax          ; num
 
     call c_syscall_routine
-
+    
     add esp, 6 * 4     
     pop gs
     pop fs

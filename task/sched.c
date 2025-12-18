@@ -109,9 +109,9 @@ static inline void signal_init(signal_t* s) {
     atomic_store(&s->state, 0);
 }
 
-static inline void signal_send(signal_t* s) {
+static inline void signal_send(signal_t* s, void (*entry)(void)) {
     atomic_store(&s->state, 1);
-    sched_wake_reaper();
+    entry();
 }
 
 static thread_t* sched_reaper_dequeue_dead(void) {
@@ -177,7 +177,7 @@ void sched_add_dead_thread(thread_t* thread) {
     sched_enqueue(&reaper_desc.dead_threads, thread);
     spinlock_unlock(&reaper_desc.lock, true);
 
-    signal_send(&reaper_desc.wake_signal);
+    signal_send(&reaper_desc.wake_signal, &sched_wake_reaper);
 }
 
 size_t sched_dead_thread_count(void) {
@@ -190,7 +190,7 @@ size_t sched_dead_thread_count(void) {
 
 void sched_stop_reaper(void) {
     reaper_desc.running = 0;
-    signal_send(&reaper_desc.wake_signal);
+    signal_send(&reaper_desc.wake_signal, &sched_wake_reaper);
 }
 
 static void stealer_thread_entry() {}
@@ -241,28 +241,22 @@ int sched_spinlocks_init(void) {
     return 0;
 }
 
+static thread_list_t ready_queue_list_instance;
+static thread_list_t sleep_queue_list_instance;
+static thread_list_t kernel_threads_inst;
+static thread_list_t user_threads_inst;
+
 int sched_scheduler_lists_init(void) {
-    thread_list_t* ready_queue_list_instance = kmalloc(sizeof(thread_list_t));
-    thread_list_t* sleep_queue_list_instance = kmalloc(sizeof(thread_list_t));
-    thread_list_t* kernel_threads_inst = kmalloc(sizeof(thread_list_t));
-    thread_list_t* user_threads_inst = kmalloc(sizeof(thread_list_t));
-
-    flop_memset(ready_queue_list_instance, 0, sizeof(thread_list_t));
-    flop_memset(sleep_queue_list_instance, 0, sizeof(thread_list_t));
-    flop_memset(kernel_threads_inst, 0, sizeof(thread_list_t));
-    flop_memset(user_threads_inst, 0, sizeof(thread_list_t));
-
-    sched.ready_queue = ready_queue_list_instance;
-    sched.sleep_queue = sleep_queue_list_instance;
-    sched.kernel_threads = kernel_threads_inst;
-    sched.user_threads = user_threads_inst;
+    sched.ready_queue = &ready_queue_list_instance;
+    sched.sleep_queue = &sleep_queue_list_instance;
+    sched.kernel_threads = &kernel_threads_inst;
+    sched.user_threads = &user_threads_inst;
 
     if (sched_spinlocks_init() < 0) {
-        kfree(sched.ready_queue, sizeof(thread_list_t));
-        kfree(sched.sleep_queue, sizeof(thread_list_t));
-        kfree(sched.kernel_threads, sizeof(thread_list_t));
-        kfree(sched.user_threads, sizeof(thread_list_t));
-        sched.ready_queue = sched.sleep_queue = sched.kernel_threads = sched.user_threads = NULL;
+        sched.ready_queue = NULL;
+        sched.sleep_queue = NULL;
+        sched.kernel_threads = NULL;
+        sched.user_threads = NULL;
         return -1;
     }
 
@@ -400,13 +394,28 @@ thread_t* sched_remove(thread_list_t* list, thread_t* target) {
     return NULL;
 }
 
+#define KERNEL_STACK_PAGES 1
+extern vmm_region_t* kernel_region;
+
 static void* sched_internal_init_thread_stack_alloc(thread_t* thread) {
-    thread->kernel_stack = (void*) kmalloc(4096);
-    if (!thread->kernel_stack) {
-        // stack allocation failed
+    uintptr_t pa = (uintptr_t) pmm_alloc_pages(0, KERNEL_STACK_PAGES);
+    if (!pa) {
+        log("sched: pmm_alloc_pages failed\n", RED);
         return NULL;
     }
 
+    uintptr_t va = vmm_alloc(kernel_region, KERNEL_STACK_PAGES, PAGE_PRESENT | PAGE_RW);
+    if (va == (uintptr_t) (-1)) {
+        pmm_free_pages((void*) pa, 0, KERNEL_STACK_PAGES);
+        log("sched: vmm_alloc failed for kernel stack\n", RED);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < KERNEL_STACK_PAGES; i++) {
+        vmm_map(kernel_region, va + i * PAGE_SIZE, pa + i * PAGE_SIZE, PAGE_PRESENT | PAGE_RW);
+    }
+
+    thread->kernel_stack = (void*) (va + KERNEL_STACK_PAGES * PAGE_SIZE);
     return thread->kernel_stack;
 }
 
@@ -415,12 +424,14 @@ static int sched_init_thread_kernel_or_user_list_insert(thread_t* thread, proces
         thread->user = 1;
         if (process == NULL) {
             // user threads require a process
+            log("sched: user thread missing process\n", RED);
             return -1;
         }
         thread->process = process;
     } else {
         thread->user = 0;
         if (process != NULL) {
+            log("sched: kernel thread passed non-null process\n", RED);
             return -1;
             // kernel threads cannot have a process
             // that's actually the only thing that makes them kernel threads.
@@ -435,38 +446,31 @@ static thread_t*
 sched_internal_init_thread(void (*entry)(void), unsigned priority, char* name, int user, process_t* process) {
     // todo: create slab cache for thread structs
     thread_t* this_thread = kmalloc(sizeof(thread_t));
-    this_thread->next = NULL;
-    this_thread->previous = NULL;
-    this_thread->kernel_stack = sched_internal_init_thread_stack_alloc(this_thread);
-    if (!this_thread->kernel_stack) {
-        // stack allocation failed
+    if (!this_thread) {
+        log("sched: thread struct kmalloc failed\n", RED);
         return NULL;
     }
 
-    // effective priority starts the same as base priority
-    // it will be boosted if the thread is starved
-    // the scheduler will always use the effective priority
-    // the base priority is simply the priority assigned upon thread creation
+    flop_memset(this_thread, 0, sizeof(thread_t));
+
+    this_thread->kernel_stack = sched_internal_init_thread_stack_alloc(this_thread);
     this_thread->priority.base = priority;
     this_thread->priority.effective = priority;
-    cpu_ctx_t this_thread_context = {.edi = 0,
-                                     .esi = 0,
-                                     .ebx = 0,
-                                     .ebp = 0,
-                                     // user threads will set eip to the user mode entry routine, use wrapper.
-                                     .eip = (uint32_t) entry};
 
-    this_thread->context = this_thread_context;
+    this_thread->context.edi = 0;
+    this_thread->context.esi = 0;
+    this_thread->context.ebx = 0;
+    this_thread->context.ebp = 0;
+    this_thread->context.eip = (uint32_t) entry;
 
-    if (!sched_init_thread_kernel_or_user_list_insert(this_thread, process, user)) {
+    if (sched_init_thread_kernel_or_user_list_insert(this_thread, process, user) < 0) {
+        log("sched: thread kernel/user assignment failed\n", RED);
         kfree(this_thread->kernel_stack, 4096);
         kfree(this_thread, sizeof(thread_t));
         return NULL;
     }
 
-    this_thread->id = sched.next_tid;
-    sched.next_tid++;
-
+    this_thread->id = sched.next_tid++;
     this_thread->name = name;
     this_thread->uptime = 0;
     this_thread->time_since_last_run = 0;
@@ -476,12 +480,25 @@ sched_internal_init_thread(void (*entry)(void), unsigned priority, char* name, i
 }
 
 thread_t* sched_create_user_thread(void (*entry)(void), unsigned priority, char* name, process_t* process) {
-    if (!process)
+    if (!process) {
+        log("sched: create user thread with null process\n", RED);
         return NULL;
+    }
+
+    if (!process->threads) {
+        process->threads = kmalloc(sizeof(thread_list_t));
+        if (!process->threads) {
+            log("sched: process thread list kmalloc failed\n", RED);
+            return NULL;
+        }
+        flop_memset(process->threads, 0, sizeof(thread_list_t));
+        spinlock_init(&process->threads->lock);
+    }
 
     thread_t* new_thread = sched_internal_init_thread((void*) usermode_entry_routine, priority, name, 1, process);
 
     if (!new_thread) {
+        log("sched: internal user thread init failed\n", RED);
         return NULL;
     }
 
@@ -489,26 +506,26 @@ thread_t* sched_create_user_thread(void (*entry)(void), unsigned priority, char*
     uintptr_t user_stack_top = sched_internal_alloc_user_stack(process, stack_index);
 
     if (!user_stack_top) {
+        log("sched: user stack allocation failed\n", RED);
+        kfree(new_thread->kernel_stack, 4096);
         kfree(new_thread, sizeof(thread_t));
         return NULL;
     }
 
     sched_internal_setup_thread_stack(new_thread, entry, user_stack_top);
 
-    // in addition to adding this thread to the thread queue in enqueue()
-    // we need to add it to the linked list of threads for the process.
-    // NOTE: this is not a thread queue. it is a list of threads for each process.
     sched_thread_list_add(new_thread, process->threads);
-
-    // we must also add it to the linked list of user threads
     sched_thread_list_add(new_thread, sched.user_threads);
-    log("sched: user thread created", GREEN);
+
+    log("sched: user thread created\n", GREEN);
     return new_thread;
 }
 
 void reaper_enqueue(thread_t* thread) {
-    if (!thread)
+    if (!thread) {
+        log("reaper: enqueue null thread\n", RED);
         return;
+    }
 
     thread->thread_state = THREAD_DEAD;
 
@@ -520,8 +537,9 @@ void reaper_enqueue(thread_t* thread) {
 extern process_t* current_process;
 
 void sched_thread_list_add(thread_t* thread, thread_list_t* list) {
-    if (!thread || !list)
+    if (!thread || !list) {
         return;
+    }
 
     spinlock(&list->lock);
 
@@ -630,14 +648,15 @@ static inline void sched_assign_time_slice(thread_t* t) {
 }
 
 static thread_t* sched_select_by_time_slice(thread_list_t* list) {
-    if (!list || !list->head)
+    if (!list || !list->head) {
         return NULL;
+    }
 
     thread_t* prev = NULL;
     thread_t* best = sched_find_best_thread(list, &prev);
-    if (!best)
+    if (!best) {
         return NULL;
-
+    }
     sched_unlink_thread(list, best, prev);
     sched_assign_time_slice(best);
 
@@ -655,8 +674,9 @@ static thread_t* sched_select_next(void) {
 }
 
 static thread_t* sched_select_idle_if_needed(thread_t* candidate) {
-    if (candidate)
+    if (candidate) {
         return candidate;
+    }
 
     thread_t* idle = sched.idle_thread;
     idle->time_slice = idle->priority.base ? idle->priority.base : 1;
@@ -683,8 +703,9 @@ void sched_schedule(void) {
     thread_t* next = sched_select_next();
     next = sched_select_idle_if_needed(next);
 
-    if (sched_should_skip(next))
+    if (sched_should_skip(next)) {
         return;
+    }
 
     sched_prepare_thread(next);
     sched_determine_and_switch(next);
@@ -713,8 +734,9 @@ void sched_yield(void) {
 
 void sched_thread_sleep(uint32_t ms) {
     thread_t* current = sched_current_thread();
-    if (!current || ms == 0)
+    if (!current || ms == 0) {
         return;
+    }
 
     current->wake_time = sched_ticks_counter + (uint64_t) ms;
     current->thread_state = THREAD_SLEEPING;

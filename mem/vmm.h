@@ -19,6 +19,8 @@ typedef struct vmm_region {
     aslr_entry_t* random_table;
     size_t random_count;
     size_t random_capacity;
+    uintptr_t base_va;
+    uintptr_t next_free_va;
 } vmm_region_t;
 
 typedef struct {
