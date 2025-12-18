@@ -20,6 +20,7 @@
 #define PMM_REGION_START(entry) (PMM_ALIGN((uintptr_t) (entry)->addr))
 #define PMM_REGION_END(entry) (((uintptr_t) (entry)->addr + (uintptr_t) (entry)->len) & ~(PAGE_SIZE - 1))
 #define PAGE_SIZE 4096
+#define ALIGN_UP(x, a) (((x) + ((a) -1)) & ~((a) -1))
 
 struct page {
     uintptr_t address;

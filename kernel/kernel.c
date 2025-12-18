@@ -39,7 +39,6 @@ kernel.c:
 #include "../lib/assert.h"
 #include "../mem/pmm.h"
 #include "../mem/utils.h"
-#include "../mem/slab.h"
 #include "../mem/vmm.h"
 #include "../mem/gdt.h"
 #include "../mem/alloc.h"

@@ -17,7 +17,6 @@ You should have received a copy of the GNU General Public License along with Flo
 #include "../mem/pmm.h"
 #include "../mem/paging.h"
 #include "../mem/vmm.h"
-#include "../mem/slab.h"
 #include "../mem/utils.h"
 #include "../fs/vfs/vfs.h"
 #include "../lib/logging.h"

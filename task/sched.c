@@ -14,7 +14,6 @@ You should have received a copy of the GNU General Public License along with Flo
 
 #include "sched.h"
 #include "../mem/alloc.h"
-#include "../mem/slab.h"
 #include "../mem/pmm.h"
 #include "../mem/paging.h"
 #include "../mem/vmm.h"
