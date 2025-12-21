@@ -201,6 +201,10 @@ void vmm_init() {
     log("vmm: init - ok\n", GREEN);
 }
 
+vmm_region_t* vmm_get_current() {
+    return current_region;
+}
+
 uint32_t* vmm_new_copied_pgdir() {
     uintptr_t new_dir_phys = (uintptr_t) pmm_alloc_page();
     if (!new_dir_phys) {

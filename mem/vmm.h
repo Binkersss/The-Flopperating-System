@@ -60,5 +60,6 @@ uintptr_t vmm_alloc(vmm_region_t* region, size_t pages, uint32_t flags);
 void vmm_free(vmm_region_t* region, uintptr_t va, size_t pages);
 void vmm_init();
 vmm_region_t* vmm_copy_pagemap(vmm_region_t* src);
+vmm_region_t* vmm_get_current();
 
 #endif

@@ -25,6 +25,7 @@ You should have received a copy of the GNU General Public License along with Flo
 
 struct buddy_allocator buddy;
 
+// split a page into two lower order pages
 static void pmm_buddy_split(uintptr_t addr, uint32_t order) {
     if (order == 0) {
         log("pmm_buddy_split: order=0, nothing to split\n", YELLOW);
@@ -54,6 +55,7 @@ static void pmm_buddy_split(uintptr_t addr, uint32_t order) {
     buddy.free_list[order - 1] = page_two;
 }
 
+// merge two pages into a higher order page
 static void pmm_buddy_merge(uintptr_t addr, uint32_t order) {
     uintptr_t buddy_addr = addr ^ (((uintptr_t) 1 << order) * PAGE_SIZE);
 
@@ -224,10 +226,10 @@ void pmm_create_free_list(multiboot_info_t* mb) {
 }
 
 uint64_t
-pmm_count_usable_pages(multiboot_info_t* mb, uintptr_t* out_firegion_startt_usable, uint64_t* out_total_bytes) {
+pmm_count_usable_pages(multiboot_info_t* mb, uintptr_t* out_region_start_usable, uint64_t* out_total_bytes) {
     if (!PMM_HAS_MMAP(mb)) {
-        if (out_firegion_startt_usable) {
-            *out_firegion_startt_usable = 0;
+        if (out_region_start_usable) {
+            *out_region_start_usable = 0;
         }
         if (out_total_bytes) {
             *out_total_bytes = 0;
@@ -271,8 +273,8 @@ pmm_count_usable_pages(multiboot_info_t* mb, uintptr_t* out_firegion_startt_usab
         ptr = PMM_MMAP_NEXT(mm);
     }
 
-    if (out_firegion_startt_usable) {
-        *out_firegion_startt_usable = firegion_startt_usable;
+    if (out_region_start_usable) {
+        *out_region_start_usable = firegion_startt_usable;
     }
 
     if (out_total_bytes) {
@@ -390,8 +392,9 @@ static void pmm_determine_split(struct page* block, uint32_t from_order, uint32_
         uintptr_t buddy_addr = block->address + split_size;
 
         struct page* right = phys_to_page_index(buddy_addr);
-        if (!right)
+        if (!right) {
             return;
+        }
 
         right->address = buddy_addr;
         right->order = from_order;
@@ -406,8 +409,9 @@ static void pmm_determine_split(struct page* block, uint32_t from_order, uint32_
 
 static void* pmm_alloc_block(uint32_t order) {
     struct page* block = pmm_fetch_order_block(order);
-    if (!block)
+    if (!block) {
         return NULL;
+    }
 
     block->is_free = 0;
     block->order = order;
@@ -428,6 +432,7 @@ static void pmm_free_block(uintptr_t addr, uint32_t order) {
     pmm_buddy_merge(page->address, order);
 }
 
+// allocate count pages of order
 void* pmm_alloc_pages(uint32_t order, uint32_t count) {
     if (order > MAX_ORDER || count == 0) {
         return NULL;
@@ -458,6 +463,7 @@ void* pmm_alloc_pages(uint32_t order, uint32_t count) {
     return start_page;
 }
 
+// free count pages of order at address
 void pmm_free_pages(void* addr, uint32_t order, uint32_t count) {
     if (!addr || order > MAX_ORDER || count == 0) {
         return;
@@ -506,8 +512,9 @@ uint32_t pmm_get_free_memory_size(void) {
 struct page* pmm_get_last_used_page(void) {
     for (int page_index = buddy.total_pages - 1; page_index >= 0; page_index--) {
         struct page* page = &buddy.page_info[page_index];
-        if (!page->is_free)
+        if (!page->is_free) {
             return page;
+        }
     }
     return NULL;
 }
@@ -522,23 +529,28 @@ uint32_t page_index(uintptr_t addr) {
 }
 
 struct page* phys_to_page_index(uintptr_t addr) {
-    // verify within range firegion_startt
-    if (addr < buddy.memory_base || addr >= buddy.memory_end)
+    // check if
+    if (addr < buddy.memory_base || addr >= buddy.memory_end) {
         return NULL;
+    }
     uint32_t index = page_index(addr);
-    if (index >= buddy.total_pages)
+    if (index >= buddy.total_pages) {
         return NULL;
+    }
     return &buddy.page_info[index];
 }
 
 int pmm_is_valid_addr(uintptr_t addr) {
-    if (addr % PAGE_SIZE != 0)
+    if (addr % PAGE_SIZE != 0) {
         return 0;
-    if (addr < buddy.memory_base || addr >= buddy.memory_end)
+    }
+    if (addr < buddy.memory_base || addr >= buddy.memory_end) {
         return 0;
+    }
     uint32_t index = page_index(addr);
-    if (index >= buddy.total_pages)
+    if (index >= buddy.total_pages) {
         return 0;
+    }
     return 1;
 }
 

@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "vmm.h"
 #include "alloc.h"
 #include "utils.h"
 #include "../lib/logging.h"
@@ -150,6 +151,8 @@ void* kmalloc(size_t size) {
         return NULL;
     }
 
+    // if above page size, use frame allocator
+    // todo: prevent fragmentation by adding blocks on top of pages allocated
     if (size > PAGE_SIZE) {
         size_t pages = (size + OBJECT_ALIGN + PAGE_SIZE - 1) / PAGE_SIZE;
         void* mem = pmm_alloc_pages(0, pages);
@@ -242,6 +245,83 @@ void* krealloc(void* ptr, size_t new_size, size_t old_size) {
     size_t copy = (old->size < new_size) ? old->size : new_size;
     flop_memcpy(n, ptr, copy);
     kfree(ptr, old_size);
+
+    return n;
+}
+
+void* kmalloc_guarded(size_t size) {
+    if (size == 0) {
+        return NULL;
+    }
+
+    size_t data_pages =
+        (size + sizeof(guarded_object_t) + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    size_t total_pages = data_pages + 1;
+
+    void* base = pmm_alloc_pages(0, total_pages);
+    if (!base) {
+        return NULL;
+    }
+
+    uintptr_t base_va = (uintptr_t) base;
+    uintptr_t guard_va = base_va + data_pages * PAGE_SIZE;
+
+    vmm_unmap(vmm_get_current(), guard_va);
+
+    guarded_object_t* obj = (guarded_object_t*) base;
+    obj->size = size;
+    obj->pages = total_pages;
+
+    return (void*) (base_va + sizeof(guarded_object_t));
+}
+
+void kfree_guarded(void* ptr) {
+    if (!ptr) {
+        return;
+    }
+
+    guarded_object_t* obj =
+        (guarded_object_t*)((uintptr_t)ptr - sizeof(guarded_object_t));
+
+    pmm_free_pages((void*)obj, 0, obj->pages);
+}
+
+void* kcalloc_guarded(size_t n, size_t s) {
+    size_t total = n * s;
+
+    void* p = kmalloc_guarded(total);
+    if (!p) {
+        return NULL;
+    }
+
+    flop_memset(p, 0, total);
+    return p;
+}
+
+void* krealloc_guarded(void* ptr, size_t new_size) {
+    if (!ptr) {
+        return kmalloc_guarded(new_size);
+    }
+
+    if (new_size == 0) {
+        kfree_guarded(ptr);
+        return NULL;
+    }
+
+    guarded_object_t* old =
+        (guarded_object_t*)((uintptr_t)ptr - sizeof(guarded_object_t));
+
+    void* n = kmalloc_guarded(new_size);
+    if (!n) {
+        return NULL;
+    }
+
+    size_t copy =
+        (old->size < new_size) ? old->size : new_size;
+
+    flop_memcpy(n, ptr, copy);
+    kfree_guarded(ptr);
 
     return n;
 }
