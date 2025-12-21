@@ -1,66 +1,51 @@
-
-global isr0
-global isr6
-global isr13
-global isr14
-
-global irq0
-global irq1
-
-; funcntions prefixed with 'c_' are C functions 
-extern c_isr0
-extern c_isr6
-extern c_isr13
-extern c_isr14
-
-extern c_irq0
-extern c_irq1
+BITS 32
 
 section .text
 
-; div by zero exception 
-isr0:
-    pusha
-    cld
-    call c_isr0
-    popa
-    iret
+extern interrupts_common
 
-; invalid opcode exception 
-isr6:
-    pusha
-    cld
-    call c_isr6
-    popa
-    iret
+global isr_stub_table
 
-; general protection fault exception 
-isr13:
+interrupts_common_stub:
     pusha
     cld
-    call c_isr13
-    popa
-    iret
 
-; page fault 
-isr14:
-    pusha
-    cld
-    call c_isr14
-    popa
+    push esp
     add esp, 4
+
+    popa
+    add esp, 8
+    sti
     iret
 
-; pit
-irq0:
-    pusha               
-    call c_irq0   
-    popa                
-    iret
+%macro ISR_NOERR 1
+isr_stub_%1:
+    cli
+    push dword 0
+    push dword %1
+    jmp interrupts_common_stub
+%endmacro
 
-; keyboard
-irq1:
-    pusha              
-    call c_irq1 
-    popa                
-    iret
+%macro ISR_ERR 1
+isr_stub_%1:
+    cli
+    push dword %1
+    jmp interrupts_common_stub
+%endmacro
+
+isr_stub_table:
+%assign i 0
+%rep 256
+    dd isr_stub_%+i
+%assign i i+1
+%endrep
+
+%assign i 0
+%rep 256
+    %if (i = 8) || (i = 10) || (i = 11) || (i = 12) || (i = 13) || (i = 14) || (i = 17)
+        ISR_ERR i
+    %else
+        ISR_NOERR i
+    %endif
+%assign i i+1
+%endrep

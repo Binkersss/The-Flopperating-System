@@ -6,76 +6,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "../mem/vmm.h"
-#include "../mem/pmm.h"
-#include "../mem/paging.h"
-#include "../mem/utils.h"
-#include "../kernel/kernel.h"
 #include <stdbool.h>
-
-extern void isr0();
-extern void isr6();
-extern void isr13();
-extern void isr14();
-
-extern void irq0();
-extern void irq1();
-
+extern void* isr_stub_table[256];
 uint32_t global_tick_count = 0;
 idt_entry_t idt[IDT_SIZE];
 idt_ptr_t idtp;
-
-void interrupts_stack_init() {
-    uint32_t stack_top = (uint32_t) (interrupt_stack + ISR_STACK_SIZE);
-    __asm__ volatile("mov %0, %%esp" ::"r"(stack_top));
-}
-
-#define PIT_FREQUENCY 100
-
-// wrapper for the scheduler tick
-void scheduler_tick() {
-    return;
-}
-
-extern void isr0();
-extern void isr6();
-extern void isr13();
-extern void isr14();
-
-extern void irq0();
-extern void irq1();
-
-/* interupt service routines */
-
-void c_isr0(void) {
-    log("isr0: divide by zero error, get fucked\n", RED);
-    __asm__("hlt");
-}
-
-void c_isr6(void) {
-    log("isr6: invalid opcode error, get fucked\n", RED);
-    __asm__("hlt");
-}
-
-void c_isr13(void) {
-    log("isr13: general protection fault, get fucked\n", RED);
-    __asm__("hlt");
-}
-
-// page fault
-void c_isr14(void) {
-    uint32_t addr;
-    uint32_t error_code;
-
-    __asm__ volatile("mov %%cr2, %0" : "=r"(addr));
-
-    __asm__ volatile("movl 4(%%esp), %0" : "=r"(error_code));
-
-    log("isr14: page fault, get fucked\n", RED);
-    log_address("Faulting Address: ", addr);
-    log_uint("Error Code: ", error_code);
-    __asm__("hlt");
-}
 
 typedef enum {
     IRQ_PIT = 0,
@@ -96,62 +31,70 @@ typedef enum {
     IRQ_UNIMPLEMENTED6 = 15
 } irq_num_t;
 
-void pic_register_eio(irq_num_t irq) {
-    if (irq >= IRQ_CMOS) {
+static inline void pic_eoi(uint8_t irq) {
+    if (irq >= 8)
         outb(PIC2_COMMAND, PIC_EOI);
-    } else {
-        outb(PIC1_COMMAND, PIC_EOI);
+    outb(PIC1_COMMAND, PIC_EOI);
+}
+
+typedef struct interrupt_frame {
+    uint32_t edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
+    uint32_t int_no;
+    uint32_t err_code;
+    uint32_t eip;
+    uint32_t cs;
+    uint32_t eflags;
+    uint32_t useresp;
+    uint32_t ss;
+} interrupt_frame_t;
+
+void interrupts_common(interrupt_frame_t* frame);
+
+void interrupts_common(interrupt_frame_t* f) {
+    switch (f->int_no) {
+        case 0:
+            log("Divide by zero", RED);
+            for (;;) {
+                asm volatile("hlt");
+            }
+
+        case 6:
+            log("Invalid opcode", RED);
+            for (;;) {
+                asm volatile("hlt");
+            }
+
+        case 13:
+            log("General protection fault", RED);
+            for (;;) {
+                asm volatile("hlt");
+            }
+
+        case 14: {
+            uint32_t cr2;
+            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+            log("Page fault", RED);
+            log_address("CR2: ", cr2);
+            log_uint("ERR: ", f->err_code);
+            for (;;) {
+                asm volatile("hlt");
+            }
+        }
+
+        case 32:
+            global_tick_count++;
+            sched_tick();
+            pic_eoi(0);
+            break;
+
+        case 33:
+            pic_eoi(1);
+            break;
+
+        default:
+            log_uint("Unhandled interrupt: ", f->int_no);
+            break;
     }
-}
-
-// pit
-void c_irq0(void) {
-    global_tick_count++;
-    scheduler_tick();
-    pic_register_eio(IRQ_PIT);
-}
-
-// keyboard
-void c_irq1(void) {
-    // eh
-    pic_register_eio(IRQ_KEYBOARD);
-}
-
-/* the following are unimplemented IRQs for now */
-
-// cascade
-void c_irq2(void) {
-    pic_register_eio(IRQ_CASCADE);
-}
-
-// COM2
-void c_irq3(void) {
-    pic_register_eio(IRQ_COM2);
-}
-
-// COM1
-void c_irq4(void) {
-    pic_register_eio(IRQ_COM1);
-}
-
-// LPT2
-void c_irq5(void) {
-    pic_register_eio(IRQ_LPT2);
-}
-
-// floppy
-void c_irq6(void) {
-    pic_register_eio(IRQ_FLOPPY);
-}
-
-// LPT1
-void c_irq7(void) {
-    pic_register_eio(IRQ_LPT1);
-}
-
-// CMOS
-void c_irq8(void) {
-    pic_register_eio(IRQ_CMOS);
 }
 
 void idt_set_entry(int n, uint32_t base, uint16_t sel, uint8_t flags) {
@@ -193,29 +136,17 @@ static void pit_init() {
 
 extern void syscall_routine();
 
-// set idt entries for the isr and irq and load them
-static void idt_init() {
-    idtp.limit = (sizeof(idt_entry_t) * IDT_SIZE) - 1;
+void idt_init(void) {
+    idtp.limit = sizeof(idt_entry_t) * 256 - 1;
     idtp.base = (uint32_t) &idt;
 
-    // zero entries
-    for (size_t i = 0; i < IDT_SIZE; i++) {
-        idt_set_entry(i, 0, 0, 0);
+    for (int i = 0; i < 256; i++) {
+        idt_set_entry(i, (uint32_t) isr_stub_table[i], KERNEL_CODE_SEGMENT, 0x8E);
     }
 
-    idt_set_entry(0, (uint32_t) isr0, KERNEL_CODE_SEGMENT, 0x8E);
-    idt_set_entry(6, (uint32_t) isr6, KERNEL_CODE_SEGMENT, 0x8E);
-    idt_set_entry(13, (uint32_t) isr13, KERNEL_CODE_SEGMENT, 0x8E);
-    idt_set_entry(14, (uint32_t) isr14, KERNEL_CODE_SEGMENT, 0x8E);
-
-    idt_set_entry(32, (uint32_t) irq0, KERNEL_CODE_SEGMENT, 0x8E);
-    idt_set_entry(33, (uint32_t) irq1, KERNEL_CODE_SEGMENT, 0x8E);
-
-    // interrupt syscall vector
-    idt_set_entry(80, (uint32_t) syscall_routine, KERNEL_CODE_SEGMENT, 0x8E);
-
-    __asm__ volatile("lidt (%0)" ::"r"(&idtp) : "memory");
+    __asm__ volatile("lidt (%0)" ::"r"(&idtp));
     __asm__ volatile("sti");
+
     log("idt: init - ok\n", GREEN);
 }
 
@@ -228,8 +159,6 @@ static void enable_interrupts() {
 }
 
 void interrupts_init() {
-    log("initializing interrupts...\n", LIGHT_GRAY);
-    interrupts_stack_init();
     pic_init();
     pit_init();
     idt_init();

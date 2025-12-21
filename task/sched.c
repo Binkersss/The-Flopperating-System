@@ -87,16 +87,11 @@ int sched_spinlocks_init(void) {
     return 0;
 }
 
-static thread_list_t ready_queue_list_instance;
-static thread_list_t sleep_queue_list_instance;
-static thread_list_t kernel_threads_inst;
-static thread_list_t user_threads_inst;
-
 int sched_scheduler_lists_init(void) {
-    sched.ready_queue = &ready_queue_list_instance;
-    sched.sleep_queue = &sleep_queue_list_instance;
-    sched.kernel_threads = &kernel_threads_inst;
-    sched.user_threads = &user_threads_inst;
+    sched.ready_queue = (thread_list_t*) kmalloc(sizeof(thread_list_t));
+    sched.sleep_queue = (thread_list_t*) kmalloc(sizeof(thread_list_t));
+    sched.kernel_threads = (thread_list_t*) kmalloc(sizeof(thread_list_t));
+    sched.user_threads = (thread_list_t*) kmalloc(sizeof(thread_list_t));
 
     if (sched_spinlocks_init() < 0) {
         sched.ready_queue = NULL;
@@ -138,7 +133,7 @@ void sched_init(void) {
 
     sched_thread_list_add(sched.idle_thread, sched.ready_queue);
 
-    log("sched: init - ok", GREEN);
+    log("sched: init - ok\n", GREEN);
 }
 
 // add thread to the end of a thread queue
@@ -554,6 +549,7 @@ void sched_yield(void) {
     if (!current_thread) {
         return;
     }
+
     if (current_thread != sched.idle_thread) {
         sched_enqueue(sched.ready_queue, current_thread);
     }
@@ -567,7 +563,7 @@ void sched_block(void) {
         return;
     }
 
-    current->thread_state = THREAD_SLEEPING;
+    current->thread_state = THREAD_BLOCKED;
 
     sched_schedule();
 }

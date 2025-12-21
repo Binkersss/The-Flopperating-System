@@ -7,6 +7,7 @@
 #include "../../lib/assert.h"
 #include "../../lib/logging.h"
 extern thread* current_thread;
+
 typedef enum {
     MUTEX_UNLOCKED,
     MUTEX_LOCKED
@@ -40,12 +41,7 @@ void mutex_lock(mutex_t* mutex, process_t* owner) {
 
         // wait for mutex to be unlocked
         if (atomic_compare_exchange_strong_explicit(
-                &mutex->state,
-                &expected,
-                MUTEX_LOCKED,
-                memory_order_acquire,
-                memory_order_relaxed)) {
-
+                &mutex->state, &expected, MUTEX_LOCKED, memory_order_acquire, memory_order_relaxed)) {
             mutex->owner = owner;
             return;
         }
@@ -53,7 +49,7 @@ void mutex_lock(mutex_t* mutex, process_t* owner) {
         spinlock(&mutex->wait_lock);
 
         // if mutex is unlocked, unlock wait_lock and try again
-        if (atomic_load_explicit(&mutex->state, memory_order_relaxed) == 0) {
+        if (atomic_load_explicit(&mutex->state, memory_order_relaxed) == MUTEX_UNLOCKED) {
             spinlock_unlock(&mutex->wait_lock, true);
             continue;
         }
@@ -67,7 +63,6 @@ void mutex_lock(mutex_t* mutex, process_t* owner) {
         sched_block();
     }
 }
-
 
 void mutex_unlock(mutex_t* mutex) {
     thread_t* current = current_thread;

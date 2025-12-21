@@ -44,7 +44,7 @@ static uint8_t interrupt_stack[ISR_STACK_SIZE] __attribute__((aligned(16)));
 #define PIT_COMMAND_PORT 0x43
 #define PIT_CHANNEL0_PORT 0x40
 #define PIT_BASE_FREQUENCY 1193182
-
+#define PIT_FREQUENCY 100
 #define PIT_COMMAND_MODE 0x36
 #define PIT_CHANNEL0 0x40
 #define PIT_DIVISOR_LSB_MASK 0xFF

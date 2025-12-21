@@ -589,7 +589,7 @@ int vfs_ctrl(struct vfs_node* node, unsigned long command, unsigned long arg) {
 }
 
 int vfs_truncate(struct vfs_node* node, uint32_t new_size) {
-    if (!node)  {
+    if (!node) {
         log("vfs_truncate: node is NULL\n", RED);
         return -1;
     }
