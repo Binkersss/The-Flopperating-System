@@ -12,25 +12,6 @@ uint32_t global_tick_count = 0;
 idt_entry_t idt[IDT_SIZE];
 idt_ptr_t idtp;
 
-typedef enum {
-    IRQ_PIT = 0,
-    IRQ_KEYBOARD = 1,
-    IRQ_CASCADE = 2,
-    IRQ_COM2 = 3,
-    IRQ_COM1 = 4,
-    IRQ_LPT2 = 5,
-    IRQ_FLOPPY = 6,
-    IRQ_LPT1 = 7,
-    IRQ_CMOS = 8,
-    IRQ_UNIMPLEMENTED0 = 9,
-    IRQ_UNIMPLEMENTED1 = 10,
-    IRQ_UNIMPLEMENTED2 = 11,
-    IRQ_UNIMPLEMENTED3 = 12,
-    IRQ_UNIMPLEMENTED4 = 13,
-    IRQ_UNIMPLEMENTED5 = 14,
-    IRQ_UNIMPLEMENTED6 = 15
-} irq_num_t;
-
 static inline void pic_eoi(uint8_t irq) {
     if (irq >= 8)
         outb(PIC2_COMMAND, PIC_EOI);

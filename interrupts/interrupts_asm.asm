@@ -11,16 +11,15 @@ interrupts_common_stub:
     cld
 
     push esp
+    call interrupts_common
     add esp, 4
 
     popa
     add esp, 8
-    sti
     iret
 
 %macro ISR_NOERR 1
 isr_stub_%1:
-    cli
     push dword 0
     push dword %1
     jmp interrupts_common_stub
@@ -28,7 +27,6 @@ isr_stub_%1:
 
 %macro ISR_ERR 1
 isr_stub_%1:
-    cli
     push dword %1
     jmp interrupts_common_stub
 %endmacro
