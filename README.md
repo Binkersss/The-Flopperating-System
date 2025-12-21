@@ -13,11 +13,11 @@
 
 - [x] Physical memory manager
 - [x] Virtual memory manager
-- [x] Heap allocator
+- [x] Heap allocator (box allocator unique design)
 - [x] Processes
 - [x] Scheduling
 - [x] Userspace
-- [x] IPC (pipes)
+- [x] IPC (pipes, signals)
 - [x] Interrupts
 - [x] Drivers (time, keyboard, ACPI, VGA, framebuffer)
 - [x] Grahpical Terminal 
