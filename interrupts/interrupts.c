@@ -6,82 +6,114 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "../mem/vmm.h"
+#include "../mem/pmm.h"
+#include "../mem/paging.h"
+#include "../mem/utils.h"
+#include "../kernel/kernel.h"
 #include <stdbool.h>
-extern void* isr_stub_table[256];
+
 uint32_t global_tick_count = 0;
 idt_entry_t idt[IDT_SIZE];
 idt_ptr_t idtp;
 
+typedef struct int_frame {
+    uint32_t gs, fs, es, ds;
+    uint32_t edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
+    uint32_t int_no, err_code;
+    uint32_t eip, cs, eflags, useresp, ss;
+} int_frame_t;
+
+void interrupts_stack_init() {
+    uint32_t stack_top = (uint32_t) (interrupt_stack + ISR_STACK_SIZE);
+    __asm__ volatile("mov %0, %%esp" ::"frame"(stack_top));
+}
+
 static inline void pic_eoi(uint8_t irq) {
-    if (irq >= 8)
+    if (irq >= 8) {
         outb(PIC2_COMMAND, PIC_EOI);
+    }
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
-typedef struct interrupt_frame {
-    uint32_t edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
-    uint32_t int_no;
-    uint32_t err_code;
-    uint32_t eip;
-    uint32_t cs;
-    uint32_t eflags;
-    uint32_t useresp;
-    uint32_t ss;
-} interrupt_frame_t;
+#define PIT_FREQUENCY 100
 
-void interrupts_common(interrupt_frame_t* f) {
-    switch (f->int_no) {
-        case 0:
-            log("Divide by zero", RED);
-            for (;;) {
-                asm volatile("hlt");
-            }
+#define IDT_FLAGS 0x8E
 
-        case 6:
-            log("Invalid opcode", RED);
-            for (;;) {
-                asm volatile("hlt");
-            }
+extern void* isr_stub_table[256];
 
-        case 13:
-            log("General protection fault", RED);
-            for (;;) {
-                asm volatile("hlt");
-            }
+typedef enum int_type {
+    INT_TYPE_DIVIDE_BY_ZERO = 0,
+    INT_TYPE_INVALID_OPCODE = 6,
+    INT_TYPE_GPF = 13,
+    INT_TYPE_PAGE_FAULT = 14,
+    INT_TYPE_PIT = 32,
+    INT_TYPE_PIT2 = 33,
+    INT_TYPE_SYSCALL = 80,
+} int_type_t;
 
-        case 14: {
+extern int c_syscall_routine(uint32_t num, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5);
+
+void isr_dispatch(int_frame_t* frame) {
+    switch (frame->int_no) {
+        case INT_TYPE_DIVIDE_BY_ZERO:
+            log("ISR0: divide by zero\n", RED);
+            break;
+
+        case INT_TYPE_INVALID_OPCODE:
+            log("ISR6: invalid opcode\n", RED);
+            break;
+
+        case INT_TYPE_GPF:
+            log("ISR13: GPF\n", RED);
+            break;
+
+        case INT_TYPE_PAGE_FAULT: {
             uint32_t cr2;
-            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-            log("Page fault", RED);
-            log_address("CR2: ", cr2);
-            log_uint("ERR: ", f->err_code);
-            for (;;) {
-                asm volatile("hlt");
-            }
+            __asm__ volatile("mov %%cr2, %0" : "=frame"(cr2));
+            log("ISR14: page fault\n", RED);
+            log_uint("CR2: ", cr2);
+            log_uint("ERR: ", frame->err_code);
+            break;
         }
 
-        case 32:
+        case INT_TYPE_PIT:
             global_tick_count++;
-            sched_tick();
             pic_eoi(0);
-            break;
+            return;
 
-        case 33:
+        case INT_TYPE_PIT2:
             pic_eoi(1);
-            break;
+            return;
+        case INT_TYPE_SYSCALL:
+            uint32_t num = frame->eax;
+            uint32_t a1 = frame->ebx;
+            uint32_t a2 = frame->ecx;
+            uint32_t a3 = frame->edx;
+            uint32_t a4 = frame->esi;
+            uint32_t a5 = frame->edi;
 
+            int ret = c_syscall_routine(num, a1, a2, a3, a4, a5);
+            frame->eax = ret;
+            return;
         default:
-            log_uint("Unhandled interrupt: ", f->int_no);
+            log_uint("Unhandled interrupt :( ", frame->int_no);
             break;
     }
+
+    if (frame->int_no >= 32) {
+        pic_eoi(frame->int_no - 32);
+    }
+
+    halt();
 }
 
-void idt_set_entry(int n, uint32_t base, uint16_t sel, uint8_t flags) {
+static inline void idt_set_entry(int n, uint32_t base) {
     idt[n].base_low = base & 0xFFFF;
     idt[n].base_high = (base >> 16) & 0xFFFF;
-    idt[n].sel = sel;
+    idt[n].sel = KERNEL_CODE_SEGMENT;
     idt[n].always0 = 0;
-    idt[n].flags = flags;
+    idt[n].flags = IDT_FLAGS;
 }
 
 static void pic_init() {
@@ -115,29 +147,26 @@ static void pit_init() {
 
 extern void syscall_routine();
 
-void idt_init(void) {
-    idtp.limit = sizeof(idt_entry_t) * 256 - 1;
+// set idt entries for the isr and load them
+static void idt_init() {
+    // define a limit and base
+    idtp.limit = sizeof(idt) - 1;
     idtp.base = (uint32_t) &idt;
 
+    // iterate through idt setting the vectors to the isr stub table [i]
     for (int i = 0; i < 256; i++) {
-        idt_set_entry(i, (uint32_t) isr_stub_table[i], KERNEL_CODE_SEGMENT, 0x8E);
+        idt_set_entry(i, (uint32_t) isr_stub_table[i]);
     }
 
-    __asm__ volatile("lidt (%0)" ::"r"(&idtp));
+    // we can enable interrupts now
+    __asm__ volatile("lidt %0" ::"m"(idtp));
     __asm__ volatile("sti");
 
     log("idt: init - ok\n", GREEN);
 }
 
-static void disable_interrupts() {
-    __asm__ volatile("cli");
-}
-
-static void enable_interrupts() {
-    __asm__ volatile("sti");
-}
-
 void interrupts_init() {
+    interrupts_stack_init();
     pic_init();
     pit_init();
     idt_init();

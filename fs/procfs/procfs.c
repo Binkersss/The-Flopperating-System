@@ -19,14 +19,16 @@ struct procfs {
     struct vfs_directory_entry* procfs_dir_entries;
 };
 
-static struct procfs g_procfs;
+static struct procfs pfs;
 
 static struct vfs_directory_list* procfs_build_dirlist() {
     struct vfs_directory_list* list = kmalloc(sizeof(struct vfs_directory_list));
-    if (!list)
+    if (!list) {
+        log("procfs: failed to allocate memory for directory list\n", RED);
         return NULL;
+    }
 
-    list->head = g_procfs.procfs_dir_entries;
+    list->head = pfs.procfs_dir_entries;
     list->tail = NULL;
 
     struct vfs_directory_entry* iter = list->head;
@@ -40,24 +42,27 @@ static struct vfs_directory_list* procfs_build_dirlist() {
 
 void procfs_add_entry(const char* name, int type) {
     struct vfs_directory_entry* entry = kmalloc(sizeof(struct vfs_directory_entry));
-    if (!entry)
+    if (!entry) {
+        log("procfs: failed to allocate memory for directory entry\n", RED);
         return;
+    }
 
     flopstrcopy(entry->name, name, VFS_MAX_FILE_NAME);
     entry->type = type;
     entry->next = NULL;
 
-    spinlock(&g_procfs.procfs_lock);
-    if (!g_procfs.procfs_dir_entries) {
-        g_procfs.procfs_dir_entries = entry;
+    spinlock(&pfs.procfs_lock);
+    if (!pfs.procfs_dir_entries) {
+        pfs.procfs_dir_entries = entry;
     } else {
-        struct vfs_directory_entry* iter = g_procfs.procfs_dir_entries;
-        while (iter->next)
+        struct vfs_directory_entry* iter = pfs.procfs_dir_entries;
+        while (iter->next) {
             iter = iter->next;
+        }
         iter->next = entry;
     }
-    g_procfs.procfs_count++;
-    spinlock_unlock(&g_procfs.procfs_lock, true);
+    pfs.procfs_count++;
+    spinlock_unlock(&pfs.procfs_lock, true);
 }
 
 static struct vfs_node* procfs_open(struct vfs_node* node, char* path) {
@@ -73,8 +78,9 @@ static int procfs_read(struct vfs_node* node, unsigned char* buf, unsigned long 
         return 0;
 
     size_t len = flopstrlen(node->name);
-    if (len > size)
+    if (len > size) {
         len = size;
+    }
     flopstrcopy((char*) buf, node->name, len);
     return (int) len;
 }
@@ -86,17 +92,19 @@ static int procfs_write(struct vfs_node* node, unsigned char* buf, unsigned long
 static void* procfs_mount(char* dev, char* path, int flags) {
     log("procfs: mount called\n", 0x0F);
 
-    if (!g_procfs.procfs_fs) {
-        g_procfs.procfs_fs = kmalloc(sizeof(struct vfs_fs));
-        if (!g_procfs.procfs_fs)
+    if (!pfs.procfs_fs) {
+        pfs.procfs_fs = kmalloc(sizeof(struct vfs_fs));
+        if (!pfs.procfs_fs) {
+            log("procfs: failed to allocate memory for filesystem\n", 0x0F);
             return NULL;
+        }
 
-        g_procfs.procfs_fs->filesystem_type = VFS_TYPE_PROCFS;
-        g_procfs.procfs_fs->op_table = g_procfs.procfs_ops;
-        g_procfs.procfs_fs->previous = NULL;
+        pfs.procfs_fs->filesystem_type = VFS_TYPE_PROCFS;
+        pfs.procfs_fs->op_table = pfs.procfs_ops;
+        pfs.procfs_fs->previous = NULL;
     }
 
-    return g_procfs.procfs_fs;
+    return pfs.procfs_fs;
 }
 
 static int procfs_unmount(struct vfs_mountpoint* mp, char* path) {
@@ -140,8 +148,9 @@ static struct vfs_directory_list* procfs_listdir(struct vfs_mountpoint* mp, char
 }
 
 static int procfs_stat(const char* path, struct stat* st) {
-    if (!st)
+    if (!st) {
         return -1;
+    }
     flop_memset(st, 0, sizeof(struct stat));
     st->st_mode = 0x4000;
     st->st_size = 0;
@@ -169,34 +178,34 @@ static int procfs_link(struct vfs_mountpoint* mp, char* oldname, char* newname) 
 }
 
 void procfs_init() {
-    spinlock_init(&g_procfs.procfs_lock);
-    g_procfs.procfs_count = 0;
-    g_procfs.procfs_dir_entries = NULL;
+    spinlock_init(&pfs.procfs_lock);
+    pfs.procfs_count = 0;
+    pfs.procfs_dir_entries = NULL;
 
     procfs_add_entry("cpuinfo", VFS_FILE);
     procfs_add_entry("meminfo", VFS_FILE);
 
-    g_procfs.procfs_ops.open = procfs_open;
-    g_procfs.procfs_ops.close = procfs_close;
-    g_procfs.procfs_ops.read = procfs_read;
-    g_procfs.procfs_ops.write = procfs_write;
-    g_procfs.procfs_ops.mount = procfs_mount;
-    g_procfs.procfs_ops.unmount = procfs_unmount;
-    g_procfs.procfs_ops.create = procfs_create;
-    g_procfs.procfs_ops.delete = procfs_delete;
-    g_procfs.procfs_ops.unlink = procfs_unlink;
-    g_procfs.procfs_ops.mkdir = procfs_mkdir;
-    g_procfs.procfs_ops.rmdir = procfs_rmdir;
-    g_procfs.procfs_ops.rename = procfs_rename;
-    g_procfs.procfs_ops.ctrl = procfs_ctrl;
-    g_procfs.procfs_ops.seek = procfs_seek;
-    g_procfs.procfs_ops.listdir = procfs_listdir;
-    g_procfs.procfs_ops.stat = procfs_stat;
-    g_procfs.procfs_ops.fstat = procfs_fstat;
-    g_procfs.procfs_ops.lstat = procfs_lstat;
-    g_procfs.procfs_ops.truncate = procfs_truncate;
-    g_procfs.procfs_ops.ioctl = procfs_ioctl;
-    g_procfs.procfs_ops.link = procfs_link;
+    pfs.procfs_ops.open = procfs_open;
+    pfs.procfs_ops.close = procfs_close;
+    pfs.procfs_ops.read = procfs_read;
+    pfs.procfs_ops.write = procfs_write;
+    pfs.procfs_ops.mount = procfs_mount;
+    pfs.procfs_ops.unmount = procfs_unmount;
+    pfs.procfs_ops.create = procfs_create;
+    pfs.procfs_ops.delete = procfs_delete;
+    pfs.procfs_ops.unlink = procfs_unlink;
+    pfs.procfs_ops.mkdir = procfs_mkdir;
+    pfs.procfs_ops.rmdir = procfs_rmdir;
+    pfs.procfs_ops.rename = procfs_rename;
+    pfs.procfs_ops.ctrl = procfs_ctrl;
+    pfs.procfs_ops.seek = procfs_seek;
+    pfs.procfs_ops.listdir = procfs_listdir;
+    pfs.procfs_ops.stat = procfs_stat;
+    pfs.procfs_ops.fstat = procfs_fstat;
+    pfs.procfs_ops.lstat = procfs_lstat;
+    pfs.procfs_ops.truncate = procfs_truncate;
+    pfs.procfs_ops.ioctl = procfs_ioctl;
+    pfs.procfs_ops.link = procfs_link;
 
     log("procfs: init - ok\n", GREEN);
 }

@@ -200,9 +200,9 @@ void paging_init(void) {
 
     current_pg_dir = pd;
     load_pd(pd);
-    log("page directory loaded\n", YELLOW);
+    log("page directory loaded\n", GREEN);
     enable_paging(0, 0);
-    log("paging enabled\n", YELLOW);
+    log("paging enabled\n", GREEN);
 
     int paging_setup_stack_status = paging_init_paging_stack();
 
@@ -220,5 +220,5 @@ void paging_init(void) {
         return;
     }
 
-    log("paging: init - ok\n", YELLOW);
+    log("paging: init - ok\n", GREEN);
 }

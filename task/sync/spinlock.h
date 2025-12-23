@@ -12,7 +12,7 @@ typedef struct spinlock {
 } spinlock_t;
 
 static inline void spinlock_init(spinlock_t* lock) {
-    __atomic_store_n(&lock->state, 0u, __ATOMIC_RELAXED);
+    atomic_store(&lock->state, __ATOMIC_RELAXED);
 }
 
 static inline bool spinlock_trylock(spinlock_t* lock) {

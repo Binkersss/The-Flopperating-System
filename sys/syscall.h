@@ -15,6 +15,7 @@ struct syscall_args {
 };
 
 typedef int (*syscall_function_pointer)(struct syscall_args*);
+int c_syscall_routine(uint32_t num, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5);
 
 typedef enum syscall_num {
     SYSCALL_READ = 0,
